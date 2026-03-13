@@ -38,10 +38,21 @@
     </div>
   </div>
   <div class="center-content">
-    <h1>Victron AES Key Configuration</h1>
-    <!-- AES Key Form -->
+    <h1>Victron Device Configuration</h1>
+    <!-- Device Configuration Form -->
     <form id="keyForm">
-      <label for="key">Enter 16-byte AES Key (32 hex chars):</label><br/>
+      <label for="mac">Device MAC Address (12 hex chars):</label><br/>
+      <input type="text"
+             id="mac"
+             name="mac"
+             minlength="12"
+             maxlength="12"
+             pattern="[0-9A-Fa-f]{12}"
+             placeholder="A4C13820A6E4"
+             required
+             autocomplete="off"/><br/><br/>
+      
+      <label for="key">AES Encryption Key (32 hex chars):</label><br/>
       <input type="text"
              id="key"
              name="key"
@@ -51,7 +62,7 @@
              placeholder="4B7178E64C828A262CDD5161E3404B7A"
              required
              autocomplete="off"/><br/>
-      <button type="submit">Save Key</button>
+      <button type="submit">Add Device</button>
     </form>
     <div id="response"></div>
   </div>
@@ -63,8 +74,12 @@
         e.preventDefault();
         var form = this;
         $.post('/save', $(form).serialize())
-          .done(function() { $('#response').text('Saved! Rebooting…'); })
-          .fail(function() { $('#response').text('Error saving key.'); });
+          .done(function() { 
+              $('#response').text('Device added successfully! You can add more devices or close this page.');
+              // Clear the form fields after successful submission
+              form.reset();
+          })
+          .fail(function() { $('#response').text('Error adding device.'); });
         triggerExplosion(form.querySelector('button'));
         setTimeout(triggerSpiralParticleCollect, 4000);
     });
@@ -251,19 +266,30 @@ function hexCharHint(el) {
     setTimeout(() => span.remove(), 5000);
 }
 
-// Hook into your input validation
+// Hook into input validation for both fields
+const macInput = document.getElementById('mac');
 const keyInput = document.getElementById('key');
 const keyForm = document.getElementById('keyForm');
-keyInput.addEventListener('input', function(e) {
-    let val = keyInput.value.toUpperCase().replace(/[^0-9A-F]/g, '');
-    if (val !== keyInput.value.toUpperCase()) {
-        keyInput.value = val;
-        keyForm.classList.remove('red-glow');
-        void keyForm.offsetWidth;
-        keyForm.classList.add('red-glow');
-        hexCharHint(keyForm); // <-- show hex char hint
+
+function validateHexInput(input, form) {
+    let val = input.value.toUpperCase().replace(/[^0-9A-F]/g, '');
+    if (val !== input.value.toUpperCase()) {
+        input.value = val;
+        form.classList.remove('red-glow');
+        void form.offsetWidth;
+        form.classList.add('red-glow');
+        hexCharHint(form); // <-- show hex char hint
     }
+}
+
+macInput.addEventListener('input', function(e) {
+    validateHexInput(macInput, keyForm);
 });
+
+keyInput.addEventListener('input', function(e) {
+    validateHexInput(keyInput, keyForm);
+});
+
 keyForm.addEventListener('animationend', function() {
     keyForm.classList.remove('red-glow');
 });
@@ -271,8 +297,8 @@ keyForm.addEventListener('animationend', function() {
   <div id="guideModal" class="guide-modal" role="dialog" aria-modal="true" aria-labelledby="guideModalTitle">
     <div class="guide-modal__content">
       <button id="closeGuide" class="guide-modal__close" type="button" aria-label="Close guide">&times;</button>
-      <h2 id="guideModalTitle">Find Your Victron AES Key</h2>
-      <p class="guide-modal__intro">Follow these steps to export the AES key from VictronConnect.</p>
+      <h2 id="guideModalTitle">Find Your Victron Device Details</h2>
+      <p class="guide-modal__intro">Follow these steps to get the MAC address and AES key from VictronConnect.</p>
       <div class="guide-steps" role="presentation">
         <section class="guide-step active" data-step="1">
           <h3><span class="step-badge">Step 1</span> Get the app ready</h3>
@@ -308,15 +334,15 @@ keyForm.addEventListener('animationend', function() {
           </div>
         </section>
         <section class="guide-step" data-step="5">
-          <h3><span class="step-badge">Step 5</span> Locate the AES key</h3>
-          <p>Find the field labelled <em>Encryption key</em>. Long-press the value to copy it or take a screenshot so you can transcribe it safely.</p>
+          <h3><span class="step-badge">Step 5</span> Locate device details</h3>
+          <p>Find the <em>MAC address</em> (usually shown at the top) and the <em>Encryption key</em> field. Long-press each value to copy them or take screenshots so you can transcribe them safely.</p>
           <div class="guide-step__media">
             <img src="vc-encryption-data.png" alt="VictronConnect encryption data screen"/>
           </div>
         </section>
         <section class="guide-step" data-step="6">
-          <h3><span class="step-badge">Step 6</span> Add the key here</h3>
-          <p>Return to this configuration page, paste or carefully type the 32-character key into the form, then press <strong>Save Key</strong>. Reboot the device if requested.</p>
+          <h3><span class="step-badge">Step 6</span> Add device here</h3>
+          <p>Return to this configuration page, enter the 12-character MAC address and 32-character AES key into the form, then press <strong>Add Device</strong>. The device will be saved and you can add more devices if needed.</p>
           <div class="guide-step__media">
             <img src="vc-final-key.png" alt="VictronConnect screen showing the final encryption key"/>
           </div>

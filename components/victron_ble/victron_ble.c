@@ -25,7 +25,10 @@ static bool victron_debug_enabled = false;
 #define NA_U10          0x3FF
 #define NA_U22          0x3FFFFF
 
-static uint8_t aes_key[16];
+// Multiple device configuration
+static victron_device_config_t device_configs[VICTRON_MAX_DEVICES];
+static uint8_t device_count = 0;
+static uint8_t legacy_aes_key[16];  // Fallback for single-key compatibility
 
 typedef enum {
     VICTRON_MANUFACTURER_RECORD_PRODUCT_ADVERTISEMENT = 0x10,
@@ -57,6 +60,31 @@ static inline int32_t sign_extend(uint32_t value, uint8_t bits)
 }
 
 /* -------------------------------------------------------------------------- */
+/*  Device Configuration Lookup                                               */
+/* -------------------------------------------------------------------------- */
+
+static const victron_device_config_t* find_device_config_by_mac(const uint8_t mac[6])
+{
+    // Format the MAC address as string for comparison (BLE addresses are stored in reverse order)
+    char mac_str[18];
+    snprintf(mac_str, sizeof(mac_str), "%02X:%02X:%02X:%02X:%02X:%02X",
+             mac[5], mac[4], mac[3], mac[2], mac[1], mac[0]);
+
+    // Search for matching device configuration
+    for (int i = 0; i < device_count; i++) {
+        if (device_configs[i].enabled && 
+            strcasecmp(device_configs[i].mac_address, mac_str) == 0) {
+            VDBG("Found device config for MAC %s: '%s'", 
+                 mac_str, device_configs[i].device_name);
+            return &device_configs[i];
+        }
+    }
+
+    VDBG("No device config found for MAC %s", mac_str);
+    return NULL;
+}
+
+/* -------------------------------------------------------------------------- */
 /*  Initialization                                                            */
 /* -------------------------------------------------------------------------- */
 
@@ -73,20 +101,32 @@ void victron_ble_init(void)
     }
     ESP_ERROR_CHECK(ret);
 
-    // Load AES key from NVS or fallback to default
-    if (load_aes_key(aes_key) == ESP_OK) {
-        ESP_LOGI(TAG, "Loaded AES key from NVS");
+    // Load multiple device configurations
+    if (load_victron_devices(device_configs, &device_count, VICTRON_MAX_DEVICES) == ESP_OK) {
+        ESP_LOGI(TAG, "Loaded %d Victron device configurations", device_count);
+        for (int i = 0; i < device_count; i++) {
+            if (device_configs[i].enabled) {
+                ESP_LOGI(TAG, "Device %d: MAC=%s, Name='%s', Enabled=%s",
+                         i, device_configs[i].mac_address, device_configs[i].device_name,
+                         device_configs[i].enabled ? "YES" : "NO");
+            }
+        }
     } else {
-        ESP_LOGW(TAG, "No user AES key found in NVS, using default");
+        ESP_LOGW(TAG, "Failed to load device configurations");
+        device_count = 0;
+    }
+
+    // Load legacy single AES key as fallback for compatibility
+    if (load_aes_key(legacy_aes_key) == ESP_OK) {
+        ESP_LOGI(TAG, "Loaded legacy AES key for compatibility");
+    } else {
+        ESP_LOGW(TAG, "No legacy AES key found, using default");
         const uint8_t default_key[16] = {
             0x4B,0x71,0x78,0xE6, 0x4C,0x82,0x8A,0x26,
             0x2C,0xDD,0x51,0x61, 0xE3,0x40,0x4B,0x7A
         };
-        memcpy(aes_key, default_key, sizeof(aes_key));
+        memcpy(legacy_aes_key, default_key, sizeof(legacy_aes_key));
     }
-
-    ESP_LOGI(TAG, "Using AES key:");
-    ESP_LOG_BUFFER_HEX(TAG, aes_key, sizeof(aes_key));
 
     ESP_LOGI(TAG, "Initializing NimBLE stack");
     nimble_port_init();
@@ -98,6 +138,29 @@ void victron_ble_set_debug(bool enabled)
 {
     victron_debug_enabled = enabled;
     ESP_LOGI(TAG, "Victron BLE debug set to %s", enabled ? "ENABLED" : "disabled");
+}
+
+void victron_ble_reload_device_config(void)
+{
+    ESP_LOGI(TAG, "Reloading Victron device configuration");
+    
+    if (load_victron_devices(device_configs, &device_count, VICTRON_MAX_DEVICES) == ESP_OK) {
+        ESP_LOGI(TAG, "Reloaded %d Victron device configurations", device_count);
+        for (int i = 0; i < device_count; i++) {
+            if (device_configs[i].enabled) {
+                ESP_LOGI(TAG, "Device %d: MAC=%s, Name='%s', Enabled=%s",
+                         i, device_configs[i].mac_address, device_configs[i].device_name,
+                         device_configs[i].enabled ? "YES" : "NO");
+            }
+        }
+        
+        // Refresh the UI device list to show the updated configuration
+        extern void ui_refresh_victron_device_list(void);
+        ui_refresh_victron_device_list();
+    } else {
+        ESP_LOGW(TAG, "Failed to reload device configurations");
+        device_count = 0;
+    }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -190,6 +253,24 @@ static int ble_gap_event_handler(struct ble_gap_event *event, void *arg)
         }
     }
 
+    // Look up device configuration by MAC address
+    const victron_device_config_t* device_config = find_device_config_by_mac(event->disc.addr.val);
+    const uint8_t* device_aes_key = NULL;
+    
+    if (device_config != NULL) {
+        device_aes_key = device_config->aes_key;
+        VDBG("Using device-specific AES key for %s (MAC: %s)", 
+             device_config->device_name, device_config->mac_address);
+    } else {
+        // Fallback to legacy single key for backward compatibility
+        device_aes_key = legacy_aes_key;
+        if (device_count > 0) {
+            VDBG("Device not found in %d configured devices, using legacy key", device_count);
+        } else {
+            VDBG("No devices configured, using legacy AES key");
+        }
+    }
+
     // Verbose packet log
     VDBG("=== Victron BLE Packet Received ===");
     VDBG("MAC: %02X:%02X:%02X:%02X:%02X:%02X",
@@ -199,14 +280,21 @@ static int ble_gap_event_handler(struct ble_gap_event *event, void *arg)
     VDBG("Vendor ID: 0x%04X, Record: 0x%02X (%s)",
          mdata->vendorID, mdata->victronRecordType,
          get_device_type_name(mdata->victronRecordType));
-    VDBG("Nonce: 0x%04X, KeyMatch: 0x%02X (local[0]=0x%02X)",
-         mdata->nonceDataCounter, mdata->encryptKeyMatch, aes_key[0]);
+    VDBG("Nonce: 0x%04X, KeyMatch: 0x%02X (device_key[0]=0x%02X)",
+         mdata->nonceDataCounter, mdata->encryptKeyMatch, device_aes_key[0]);
     if (victron_debug_enabled)
         ESP_LOG_BUFFER_HEX_LEVEL(TAG, fields.mfg_data, fields.mfg_data_len, ESP_LOG_INFO);
 
-    if (mdata->encryptKeyMatch != aes_key[0]) {
+    // Check if we should ignore unknown devices
+    if (device_config == NULL && device_count > 0) {
+        // If we have configured devices, ignore packets from unknown MACs
+        ESP_LOGD(TAG, "Ignoring packet from unknown MAC address (not in configured device list)");
+        return 0;
+    }
+
+    if (mdata->encryptKeyMatch != device_aes_key[0]) {
         ESP_LOGW(TAG, "Key mismatch! Device key[0]=0x%02X, ours=0x%02X - skipping decrypt",
-                 mdata->encryptKeyMatch, aes_key[0]);
+                 mdata->encryptKeyMatch, device_aes_key[0]);
         return 0;
     }
 
@@ -228,7 +316,7 @@ static int ble_gap_event_handler(struct ble_gap_event *event, void *arg)
     /* ---------------- AES CTR Decrypt ---------------- */
     esp_aes_context ctx;
     esp_aes_init(&ctx);
-    if (esp_aes_setkey(&ctx, aes_key, 128)) {
+    if (esp_aes_setkey(&ctx, device_aes_key, 128)) {
         ESP_LOGE(TAG, "AES setkey failed");
         esp_aes_free(&ctx);
         return 0;

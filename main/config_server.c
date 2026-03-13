@@ -1,6 +1,7 @@
 /* config_server.c */
 #include "config_server.h"
 #include "config_storage.h"
+#include "victron_ble.h"
 #include "esp_spiffs.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
@@ -234,34 +235,113 @@ static esp_err_t handle_static(httpd_req_t *req) {
     return serve_from_spiffs(req, req->uri);
 }
 
-// Fallback form for POST /save (AES key)
+// Handler for POST /save (MAC address and AES key)
 static esp_err_t post_save(httpd_req_t *req) {
     ESP_LOGV(TAG, "HTTP POST /save");
     size_t len = req->content_len;
-    if (!len || len > 64) {
+    if (!len || len > 512) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid length");
         return ESP_FAIL;
     }
-    char *body = malloc(len+1);
+    
+    char *body = malloc(len + 1);
     if (!body) return ESP_FAIL;
+    
     int ret = httpd_req_recv(req, body, len);
-    if (ret <= 0) { free(body); return ESP_FAIL; }
+    if (ret <= 0) { 
+        free(body); 
+        return ESP_FAIL; 
+    }
     body[ret] = '\0';
-    char *hex = strchr(body, '=');
-    if (!hex || strlen(hex+1) != 32) { free(body); return ESP_FAIL; }
-    hex++;
-    uint8_t key[16];
+    
+    ESP_LOGI(TAG, "Received form data: %s", body);
+    
+    // Parse form data: mac=XXXXXXXXXXXX&key=YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY
+    char mac_str[13] = {0};
+    char key_str[33] = {0};
+    uint8_t mac[6] = {0};
+    uint8_t key[16] = {0};
+    
+    // Extract MAC address
+    char *mac_param = strstr(body, "mac=");
+    if (!mac_param) {
+        ESP_LOGE(TAG, "MAC parameter not found");
+        free(body);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "MAC address required");
+        return ESP_FAIL;
+    }
+    
+    char *mac_value = mac_param + 4; // Skip "mac="
+    char *mac_end = strchr(mac_value, '&');
+    int mac_len = mac_end ? (mac_end - mac_value) : strlen(mac_value);
+    
+    if (mac_len != 12) {
+        ESP_LOGE(TAG, "Invalid MAC length: %d", mac_len);
+        free(body);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "MAC must be 12 hex characters");
+        return ESP_FAIL;
+    }
+    
+    strncpy(mac_str, mac_value, 12);
+    mac_str[12] = '\0';
+    
+    // Extract AES key
+    char *key_param = strstr(body, "key=");
+    if (!key_param) {
+        ESP_LOGE(TAG, "Key parameter not found");
+        free(body);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "AES key required");
+        return ESP_FAIL;
+    }
+    
+    char *key_value = key_param + 4; // Skip "key="
+    char *key_end = strchr(key_value, '&');
+    int key_len = key_end ? (key_end - key_value) : strlen(key_value);
+    
+    if (key_len != 32) {
+        ESP_LOGE(TAG, "Invalid key length: %d", key_len);
+        free(body);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "AES key must be 32 hex characters");
+        return ESP_FAIL;
+    }
+    
+    strncpy(key_str, key_value, 32);
+    key_str[32] = '\0';
+    
+    // Parse MAC address from hex string
+    for (int i = 0; i < 6; i++) {
+        char tmp[3] = { mac_str[i*2], mac_str[i*2+1], 0 };
+        mac[i] = strtol(tmp, NULL, 16);
+    }
+    
+    // Parse AES key from hex string
     for (int i = 0; i < 16; i++) {
-        char tmp[3] = { hex[i*2], hex[i*2+1], 0 };
+        char tmp[3] = { key_str[i*2], key_str[i*2+1], 0 };
         key[i] = strtol(tmp, NULL, 16);
     }
-    ESP_LOGI(TAG, "Parsed AES key:"); ESP_LOG_BUFFER_HEX(TAG, key, 16);
-    save_aes_key(key);
+    
+    ESP_LOGI(TAG, "Parsed MAC address: %02X:%02X:%02X:%02X:%02X:%02X", 
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    ESP_LOGI(TAG, "Parsed AES key:"); 
+    ESP_LOG_BUFFER_HEX(TAG, key, 16);
+    
+    // Save to Victron devices configuration
+    esp_err_t err = add_victron_device(mac, key);
+    
     free(body);
+    
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to save device: %s", esp_err_to_name(err));
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to save device");
+        return ESP_FAIL;
+    }
+    
+    // Reload BLE configuration to include the new device
+    victron_ble_reload_device_config();
+    
     httpd_resp_set_type(req, "text/html");
-    httpd_resp_send(req, "<h3>Saved. Rebooting...</h3>", HTTPD_RESP_USE_STRLEN);
-    vTaskDelay(pdMS_TO_TICKS(100));
-    esp_restart();
+    httpd_resp_send(req, "<h3>Device added successfully!</h3><p>You can add more devices or close this page.</p>", HTTPD_RESP_USE_STRLEN);
+    
     return ESP_OK;
 }
 

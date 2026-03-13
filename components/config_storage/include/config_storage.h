@@ -14,8 +14,28 @@ esp_err_t load_brightness(uint8_t *brightness_out);
 esp_err_t save_brightness(uint8_t brightness);
 
 // AES key handling
+// Legacy single AES key handling (for compatibility)
 esp_err_t load_aes_key(uint8_t key_out[16]);
 esp_err_t save_aes_key(const uint8_t key_in[16]);
+
+// New multiple Victron device configuration
+#define VICTRON_MAX_DEVICES 8
+
+typedef struct {
+    char mac_address[18];    // "XX:XX:XX:XX:XX:XX" format
+    uint8_t aes_key[16];     // 16-byte AES key
+    char device_name[32];    // User-friendly device name
+    bool enabled;            // Whether this device is active
+} victron_device_config_t;
+
+esp_err_t load_victron_devices(victron_device_config_t *devices_out, 
+                               uint8_t *count_out, 
+                               uint8_t max_devices);
+esp_err_t save_victron_devices(const victron_device_config_t *devices, 
+                               uint8_t count);
+
+// Helper function to add a single device
+esp_err_t add_victron_device(const uint8_t mac[6], const uint8_t aes_key[16]);
 
 // Screensaver settings
 esp_err_t load_screensaver_settings(bool *enabled, uint8_t *brightness, uint16_t *timeout);
@@ -48,3 +68,7 @@ esp_err_t save_relay_config(bool enabled,
 // Victron BLE debug flag persistence (NVS namespace: "debug")
 esp_err_t load_victron_debug(bool *enabled_out);
 esp_err_t save_victron_debug(bool enabled);
+
+// UI view mode selection (NVS namespace: "display")
+esp_err_t load_ui_view_mode(uint8_t *mode_out);
+esp_err_t save_ui_view_mode(uint8_t mode);
