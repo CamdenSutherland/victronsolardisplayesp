@@ -267,15 +267,16 @@ static void create_display_settings_page(ui_state_t *ui, lv_obj_t *page_display)
         "Solar Charger View\n"
         "Battery Monitor View\n"
         "Inverter View\n"
-        "DC/DC Converter View"
+        "DC/DC Converter View\n"
+        "Camper View"
     );
     
     /* Load saved view mode */
-    uint8_t saved_mode = 1; // Default to UI_VIEW_MODE_DEFAULT_BATTERY
+    uint8_t saved_mode = (uint8_t)UI_VIEW_MODE_CAMPER;
     if (load_ui_view_mode(&saved_mode) == ESP_OK) {
         ui->view_selection.mode = (ui_view_mode_t)saved_mode;
     } else {
-        ui->view_selection.mode = UI_VIEW_MODE_DEFAULT_BATTERY;
+        ui->view_selection.mode = UI_VIEW_MODE_CAMPER;
     }
     lv_dropdown_set_selected(ui->view_selection.dropdown, (uint16_t)ui->view_selection.mode);
     

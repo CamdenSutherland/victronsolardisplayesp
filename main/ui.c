@@ -18,6 +18,7 @@
 #include "ui/settings_panel.h"
 #include "ui/relay_panel.h"
 #include "ui/view_default_battery.h"
+#include "ui/view_camper.h"
 
 // Font Awesome symbols (declared in main.c)
 LV_FONT_DECLARE(font_awesome_solar_panel_40);
@@ -262,11 +263,9 @@ void ui_init(void) {
     // Create default battery view instead of "No live data" label
     ui->default_view = ui_default_battery_view_create(ui, ui->tab_live);
     
-    // Show the default view initially (will be updated when data arrives based on view selection)
-    if (ui->default_view && ui->default_view->show) {
-        ui->default_view->show(ui->default_view);
-    }
-    
+    // Create camper view (hidden until selected via dropdown)
+    ui->camper_view = ui_camper_view_create(ui, ui->tab_live);
+
     // Keep the old label for compatibility but hide it
     ui->lbl_no_data = lv_label_create(ui->tab_live);
     lv_label_set_text(ui->lbl_no_data, "No live data received yet");
@@ -275,10 +274,17 @@ void ui_init(void) {
     lv_obj_set_width(ui->lbl_no_data, lv_pct(90));
     lv_obj_set_style_text_align(ui->lbl_no_data, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_center(ui->lbl_no_data);
-    lv_obj_add_flag(ui->lbl_no_data, LV_OBJ_FLAG_HIDDEN); // Hide by default
+    lv_obj_add_flag(ui->lbl_no_data, LV_OBJ_FLAG_HIDDEN);
 
     ui_settings_panel_init(ui, default_ssid, default_pass, ap_enabled);
     ui_relay_panel_init(ui);
+
+    // Show the correct initial view based on loaded settings
+    if (ui->view_selection.mode == UI_VIEW_MODE_CAMPER && ui->camper_view && ui->camper_view->show) {
+        ui->camper_view->show(ui->camper_view);
+    } else if (ui->default_view && ui->default_view->show) {
+        ui->default_view->show(ui->default_view);
+    }
 
     lv_obj_add_event_cb(lv_scr_act(), tabview_touch_event_cb, LV_EVENT_PRESSED, ui);
     lv_obj_add_event_cb(lv_scr_act(), tabview_touch_event_cb, LV_EVENT_CLICKED, ui);
@@ -307,9 +313,12 @@ void ui_on_panel_data(const victron_data_t *d) {
         }
     }
     
-    // Always update the default view with incoming data (it handles multiple device types)
+    // Always update composite views with incoming data (they handle multiple device types)
     if (ui->default_view && ui->default_view->update) {
         ui->default_view->update(ui->default_view, d);
+    }
+    if (ui->camper_view && ui->camper_view->update) {
+        ui->camper_view->update(ui->camper_view, d);
     }
 
     const char *type_str = device_type_name(d->type);
@@ -431,10 +440,15 @@ static void ensure_device_layout(ui_state_t *ui, victron_record_type_t type)
         // Manual view mode selected - determine which view to show
         victron_record_type_t target_type = VICTRON_BLE_RECORD_TEST;
         bool show_default = true;
-        
+        bool show_camper = false;
+
         switch (ui->view_selection.mode) {
             case UI_VIEW_MODE_DEFAULT_BATTERY:
                 show_default = true;
+                break;
+            case UI_VIEW_MODE_CAMPER:
+                show_camper = true;
+                show_default = false;
                 break;
             case UI_VIEW_MODE_SOLAR_CHARGER:
                 target_type = VICTRON_BLE_RECORD_SOLAR_CHARGER;
@@ -456,13 +470,28 @@ static void ensure_device_layout(ui_state_t *ui, victron_record_type_t type)
                 show_default = true;
                 break;
         }
-        
-        if (show_default) {
+
+        if (show_camper) {
+            // Show camper composite view
+            if (ui->active_view && ui->active_view->hide) {
+                ui->active_view->hide(ui->active_view);
+            }
+            ui->active_view = NULL;
+            if (ui->default_view && ui->default_view->hide) {
+                ui->default_view->hide(ui->default_view);
+            }
+            if (ui->camper_view && ui->camper_view->show) {
+                ui->camper_view->show(ui->camper_view);
+            }
+        } else if (show_default) {
             // Show default battery view
             if (ui->active_view && ui->active_view->hide) {
                 ui->active_view->hide(ui->active_view);
             }
             ui->active_view = NULL;
+            if (ui->camper_view && ui->camper_view->hide) {
+                ui->camper_view->hide(ui->camper_view);
+            }
             if (ui->default_view && ui->default_view->show) {
                 ui->default_view->show(ui->default_view);
             }
@@ -471,12 +500,15 @@ static void ensure_device_layout(ui_state_t *ui, victron_record_type_t type)
             if (ui->active_view && ui->active_view->hide) {
                 ui->active_view->hide(ui->active_view);
             }
-            
+
             ui->active_view = NULL;
             ui_device_view_t *view = ui_view_registry_ensure(ui, target_type, ui->tab_live);
             if (view && view->show) {
                 if (ui->default_view && ui->default_view->hide) {
                     ui->default_view->hide(ui->default_view);
+                }
+                if (ui->camper_view && ui->camper_view->hide) {
+                    ui->camper_view->hide(ui->camper_view);
                 }
                 view->show(view);
                 ui->active_view = view;
@@ -488,7 +520,7 @@ static void ensure_device_layout(ui_state_t *ui, victron_record_type_t type)
                 ESP_LOGW(TAG_UI, "Requested view type 0x%02X not available, showing default", (unsigned)target_type);
             }
         }
-        
+
         ui->current_device_type = show_default ? VICTRON_BLE_RECORD_TEST : target_type;
         return;
     }

@@ -552,6 +552,92 @@ static int ble_gap_event_handler(struct ble_gap_event *event, void *arg)
             break;
         }
 
+        case VICTRON_BLE_RECORD_AC_CHARGER: {
+            if (encr_size < 13) {
+                ESP_LOGW(TAG, "AC Charger payload too short: %d", encr_size);
+                break;
+            }
+
+            /*
+             * AC Charger payload: 104 bits (13 bytes), LSB-first:
+             *   Bit  0..7   (8)  Device state
+             *   Bit  8..15  (8)  Charger error
+             *   Bit 16..28  (13) Battery voltage 1  (0.01V)
+             *   Bit 29..39  (11) Battery current 1  (0.1A)
+             *   Bit 40..52  (13) Battery voltage 2  (0.01V)
+             *   Bit 53..63  (11) Battery current 2  (0.1A)
+             *   Bit 64..76  (13) Battery voltage 3  (0.01V)
+             *   Bit 77..87  (11) Battery current 3  (0.1A)
+             *   Bit 88..94  (7)  Temperature        (raw - 40 = °C)
+             *   Bit 95..103 (9)  AC current          (0.1A)
+             */
+            const uint8_t *b = output;
+            uint8_t device_state = b[0];
+            uint8_t charger_error = b[1];
+
+            /*
+             * Bits 16..103 = 88 bits = 11 bytes (b[2]..b[12]).
+             * Use a generic bit reader to avoid cross-word mistakes.
+             */
+            uint32_t bit_pos = 0;
+            uint8_t buf[11];
+            memcpy(buf, &b[2], 11);
+
+            /* helper: read n bits LSB-first from buf starting at bit_pos */
+            #define READ_BITS(n) ({ \
+                uint32_t _val = 0; \
+                for (int _i = 0; _i < (n); _i++) { \
+                    uint32_t _byte_idx = (bit_pos + _i) / 8; \
+                    uint32_t _bit_idx  = (bit_pos + _i) % 8; \
+                    if (buf[_byte_idx] & (1u << _bit_idx)) \
+                        _val |= (1u << _i); \
+                } \
+                bit_pos += (n); \
+                _val; \
+            })
+
+            uint16_t batt_v1 = (uint16_t)READ_BITS(13);
+            uint16_t batt_a1 = (uint16_t)READ_BITS(11);
+            uint16_t batt_v2 = (uint16_t)READ_BITS(13);
+            uint16_t batt_a2 = (uint16_t)READ_BITS(11);
+            uint16_t batt_v3 = (uint16_t)READ_BITS(13);
+            uint16_t batt_a3 = (uint16_t)READ_BITS(11);
+            int temp_raw     = (int)READ_BITS(7);
+            uint16_t ac_current_deci = (uint16_t)READ_BITS(9);
+
+            #undef READ_BITS
+
+            int temp_c = temp_raw - 40;
+
+            ESP_LOGI(TAG, "=== AC Charger ===");
+            ESP_LOGI(TAG, "State=%u Err=0x%02X V1=%.2fV A1=%.1fA Temp=%dC AC=%.1fA",
+                     (unsigned)device_state,
+                     (unsigned)charger_error,
+                     batt_v1 / 100.0f,
+                     batt_a1 / 10.0f,
+                     temp_c,
+                     ac_current_deci / 10.0f);
+
+            if (data_cb) {
+                victron_data_t parsed = {
+                    .type = VICTRON_BLE_RECORD_AC_CHARGER,
+                    .product_id = product_id
+                };
+                parsed.record.ac_charger.device_state = device_state;
+                parsed.record.ac_charger.charger_error = charger_error;
+                parsed.record.ac_charger.battery_voltage_1_centi = batt_v1;
+                parsed.record.ac_charger.battery_current_1_deci = batt_a1;
+                parsed.record.ac_charger.battery_voltage_2_centi = batt_v2;
+                parsed.record.ac_charger.battery_current_2_deci = batt_a2;
+                parsed.record.ac_charger.battery_voltage_3_centi = batt_v3;
+                parsed.record.ac_charger.battery_current_3_deci = batt_a3;
+                parsed.record.ac_charger.temperature_c = (int8_t)temp_c;
+                parsed.record.ac_charger.ac_current_deci = ac_current_deci;
+                data_cb(&parsed);
+            }
+            break;
+        }
+
         default:
             ESP_LOGW(TAG, "Unsupported record type 0x%02X (%s)",
                      rec_type, get_device_type_name(rec_type));
