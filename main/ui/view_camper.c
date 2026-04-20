@@ -2,6 +2,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include "ui_format.h"
+#include "solar_stats.h"
+#include "view_solar_detail.h"
 
 LV_FONT_DECLARE(font_awesome_solar_panel_40);
 LV_FONT_DECLARE(font_awesome_bolt_40);
@@ -59,6 +61,11 @@ typedef struct {
         uint16_t battery_current_1_deci;
         uint32_t last_update;
     } ac;
+
+    /* Solar history/stats + detail sub-view */
+    solar_stats_t solar_stats;
+    ui_solar_detail_view_t *solar_detail;
+    lv_obj_t *metrics_container;  /* wrapper around metrics_row so we can hide the main layout */
 } ui_camper_view_t;
 
 static void camper_view_update(ui_device_view_t *view, const victron_data_t *data);
@@ -66,6 +73,8 @@ static void camper_view_show(ui_device_view_t *view);
 static void camper_view_hide(ui_device_view_t *view);
 static void camper_view_destroy(ui_device_view_t *view);
 static void refresh_display(ui_camper_view_t *v);
+static void solar_column_click_cb(lv_event_t *e);
+static void solar_detail_back_cb(void *user_data);
 
 static const char *solar_state_str(uint8_t s)
 {
@@ -255,6 +264,15 @@ ui_device_view_t *ui_camper_view_create(ui_state_t *ui, lv_obj_t *parent)
 
     /* Init persistent state */
     v->shunt.ttg_minutes = 0xFFFFFFFF;
+    solar_stats_init(&v->solar_stats);
+
+    /* Make the solar (left) column tappable to open the solar detail view */
+    lv_obj_add_flag(v->left_column, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(v->left_column, solar_column_click_cb, LV_EVENT_CLICKED, v);
+
+    /* Create the solar detail sub-view (hidden by default) */
+    v->solar_detail = ui_solar_detail_view_create(ui, v->base.root,
+                                                  solar_detail_back_cb, v);
 
     v->base.update = camper_view_update;
     v->base.show = camper_view_show;
@@ -297,6 +315,17 @@ static void camper_view_update(ui_device_view_t *view, const victron_data_t *dat
         v->solar.device_state = s->device_state;
         v->solar.yield_today_centikwh = s->yield_today_centikwh;
         v->solar.last_update = now;
+
+        solar_stats_on_sample(&v->solar_stats,
+                              s->pv_power_w,
+                              s->yield_today_centikwh,
+                              now);
+
+        if (v->solar_detail) {
+            ui_solar_detail_view_refresh(v->solar_detail,
+                                         &v->solar_stats,
+                                         s->pv_power_w);
+        }
         break;
     }
     case VICTRON_BLE_RECORD_AC_CHARGER: {
@@ -460,12 +489,40 @@ static void camper_view_hide(ui_device_view_t *view)
 
 static void camper_view_destroy(ui_device_view_t *view)
 {
-    if (view == NULL) {
+    ui_camper_view_t *v = camper_from_base(view);
+    if (v == NULL) {
         return;
+    }
+    if (v->solar_detail) {
+        ui_solar_detail_view_destroy(v->solar_detail);
+        v->solar_detail = NULL;
     }
     if (view->root) {
         lv_obj_del(view->root);
         view->root = NULL;
     }
     free(view);
+}
+
+static void solar_column_click_cb(lv_event_t *e)
+{
+    ui_camper_view_t *v = lv_event_get_user_data(e);
+    if (v == NULL || v->solar_detail == NULL) return;
+
+    /* Hide the main 3-column layout, show the solar detail sub-view */
+    lv_obj_add_flag(v->metrics_row, LV_OBJ_FLAG_HIDDEN);
+    ui_solar_detail_view_show(v->solar_detail, &v->solar_stats,
+                              v->solar.pv_power_w);
+}
+
+static void solar_detail_back_cb(void *user_data)
+{
+    ui_camper_view_t *v = user_data;
+    if (v == NULL) return;
+    if (v->solar_detail) {
+        ui_solar_detail_view_hide(v->solar_detail);
+    }
+    if (v->metrics_row) {
+        lv_obj_clear_flag(v->metrics_row, LV_OBJ_FLAG_HIDDEN);
+    }
 }

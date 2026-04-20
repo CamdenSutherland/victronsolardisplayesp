@@ -7,6 +7,7 @@
 #include <lvgl.h>
 #include "lv_port.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "victron_ble.h"
 #include "victron_products.h"
 #include "nvs_flash.h"
@@ -304,7 +305,10 @@ void ui_on_panel_data(const victron_data_t *d) {
 
     ui_state_t *ui = &g_ui;
 
-    lvgl_port_lock(0);
+    if (!lvgl_port_lock(500)) {
+        ESP_LOGW(TAG_UI, "ui_on_panel_data: lock timeout, dropping update (type=0x%02X)", (unsigned)d->type);
+        return;
+    }
 
     if (!ui->has_received_data) {
         ui->has_received_data = true;
@@ -396,13 +400,16 @@ void ui_on_panel_data(const victron_data_t *d) {
 void ui_force_view_update(void)
 {
     ui_state_t *ui = &g_ui;
-    lvgl_port_lock(0);
-    
+    if (!lvgl_port_lock(500)) {
+        ESP_LOGW(TAG_UI, "ui_force_view_update: lock timeout");
+        return;
+    }
+
     // Force a layout update regardless of current device type
     victron_record_type_t saved_type = ui->current_device_type;
     ui->current_device_type = VICTRON_BLE_RECORD_TEST; // Reset to force update
     ensure_device_layout(ui, saved_type);
-    
+
     lvgl_port_unlock();
 }
 
@@ -419,11 +426,14 @@ void ui_set_ble_mac(const uint8_t *mac) {
              "%02X:%02X:%02X:%02X:%02X:%02X",
              mac[5], mac[4], mac[3], mac[2], mac[1], mac[0]);
     ui_state_t *ui = &g_ui;
-    lvgl_port_lock(0);
-    
+    if (!lvgl_port_lock(500)) {
+        ESP_LOGW(TAG_UI, "ui_set_ble_mac: lock timeout");
+        return;
+    }
+
     // Store current MAC address
     strcpy(ui->current_device_mac, mac_str);
-    
+
     // Legacy MAC field update (if it exists)
     ui_settings_panel_set_mac(ui, mac_str);
     lvgl_port_unlock();
@@ -711,8 +721,10 @@ static void ui_check_device_timeouts(lv_timer_t *timer)
     if (ui == NULL) {
         return;
     }
-    
+
     uint32_t current_time = lv_tick_get();
+    ESP_LOGI(TAG_UI, "heartbeat: LVGL task alive, tick=%" PRIu32 " ms, free_heap=%" PRIu32,
+             current_time, esp_get_free_heap_size());
     const uint32_t timeout_ms = 30000; // 30 seconds timeout
     
     // Check each tracked device for timeout
