@@ -317,11 +317,14 @@ void ui_on_panel_data(const victron_data_t *d) {
         }
     }
     
-    // Always update composite views with incoming data (they handle multiple device types)
-    if (ui->default_view && ui->default_view->update) {
+    // Only update the composite view that is currently visible; updating a
+    // hidden view still invalidates widgets and burns LVGL time.
+    if (ui->default_view && ui->default_view->update && ui->default_view->root &&
+        !lv_obj_has_flag(ui->default_view->root, LV_OBJ_FLAG_HIDDEN)) {
         ui->default_view->update(ui->default_view, d);
     }
-    if (ui->camper_view && ui->camper_view->update) {
+    if (ui->camper_view && ui->camper_view->update && ui->camper_view->root &&
+        !lv_obj_has_flag(ui->camper_view->root, LV_OBJ_FLAG_HIDDEN)) {
         ui->camper_view->update(ui->camper_view, d);
     }
 
@@ -366,32 +369,37 @@ void ui_on_panel_data(const victron_data_t *d) {
 
     ensure_device_layout(ui, d->type);
 
+    /* Only pay the cost of building status strings + updating off-screen
+     * settings-panel labels if the user is actually looking at the Settings
+     * tab. On the Live tab these writes are invisible and just burn CPU +
+     * lock time, which makes touch feel sluggish. */
+    bool settings_visible = (ui->tabview != NULL) &&
+                            (ui->tab_settings_index != UINT16_MAX) &&
+                            (lv_tabview_get_tab_act(ui->tabview) == ui->tab_settings_index);
+
     if (ui->active_view && ui->active_view->update) {
         ui->active_view->update(ui->active_view, d);
-        
-        // Prepare detailed status information based on device type
-        char detailed_status[256] = {0};
-        ui_prepare_detailed_device_status(d, detailed_status, sizeof(detailed_status));
-        
-        // Update device activity tracking
+
+        // Update device activity tracking (cheap, always needed for timeouts)
         ui_update_device_activity(ui, ui->current_device_mac);
-        
-        // Update successful data reception status in Victron Keys page
-        ui_settings_panel_update_victron_device_status(ui, ui->current_device_mac, type_str, product_info, detailed_status);
-    } else {
-        // Update error status in Victron Keys page
+
+        if (settings_visible) {
+            char detailed_status[256] = {0};
+            ui_prepare_detailed_device_status(d, detailed_status, sizeof(detailed_status));
+            ui_settings_panel_update_victron_device_status(ui, ui->current_device_mac,
+                                                           type_str, product_info,
+                                                           detailed_status);
+        }
+    } else if (settings_visible) {
         const char *error_msg = "No renderer for device type";
         if (d->type == VICTRON_BLE_RECORD_TEST) {
             error_msg = "Unknown device type";
         }
-        
-        // Update legacy error label (if it exists)
         if (ui->lbl_error) {
             lv_label_set_text(ui->lbl_error, error_msg);
         }
-        
-        // Update error status for this device in Victron Keys page
-        ui_settings_panel_update_victron_device_status(ui, ui->current_device_mac, type_str, product_info, error_msg);
+        ui_settings_panel_update_victron_device_status(ui, ui->current_device_mac,
+                                                       type_str, product_info, error_msg);
     }
 
     lvgl_port_unlock();

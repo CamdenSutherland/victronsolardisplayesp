@@ -15,6 +15,7 @@ struct ui_solar_detail_view {
     lv_obj_t *max_power_label;
     lv_obj_t *yield_label;
     lv_obj_t *chart;
+    lv_obj_t *y_max_label;
     lv_chart_series_t *series;
     lv_obj_t *btn_hour;
     lv_obj_t *btn_day;
@@ -57,6 +58,9 @@ static void apply_series(ui_solar_detail_view_t *v)
     /* round up to a nice ceiling */
     uint16_t ceiling = ((max_y / 50) + 1) * 50;
     lv_chart_set_range(v->chart, LV_CHART_AXIS_PRIMARY_Y, 0, ceiling);
+    if (v->y_max_label) {
+        lv_label_set_text_fmt(v->y_max_label, "%uW", ceiling);
+    }
 
     /* Fill the chart: empty slots become LV_CHART_POINT_NONE so the line starts
      * from the right edge and extends left as samples accumulate. */
@@ -203,6 +207,12 @@ ui_solar_detail_view_t *ui_solar_detail_view_create(ui_state_t *ui,
 
     v->series = lv_chart_add_series(v->chart, lv_color_hex(0xFFC107),
                                     LV_CHART_AXIS_PRIMARY_Y);
+
+    /* Y-axis max label overlaid at top-left of the chart */
+    v->y_max_label = lv_label_create(v->chart);
+    lv_obj_add_style(v->y_max_label, &ui->styles.small, 0);
+    lv_label_set_text(v->y_max_label, "--W");
+    lv_obj_align(v->y_max_label, LV_ALIGN_TOP_LEFT, 4, 2);
 
     /* Stats row - bottom, compact single row */
     lv_obj_t *stats_row = lv_obj_create(v->root);
