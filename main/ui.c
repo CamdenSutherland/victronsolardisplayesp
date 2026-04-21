@@ -7,6 +7,7 @@
 #include <lvgl.h>
 #include "lv_port.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "victron_ble.h"
 #include "victron_products.h"
 #include "nvs_flash.h"
@@ -18,6 +19,7 @@
 #include "ui/settings_panel.h"
 #include "ui/relay_panel.h"
 #include "ui/view_default_battery.h"
+#include "ui/view_camper.h"
 
 // Font Awesome symbols (declared in main.c)
 LV_FONT_DECLARE(font_awesome_solar_panel_40);
@@ -262,11 +264,9 @@ void ui_init(void) {
     // Create default battery view instead of "No live data" label
     ui->default_view = ui_default_battery_view_create(ui, ui->tab_live);
     
-    // Show the default view initially (will be updated when data arrives based on view selection)
-    if (ui->default_view && ui->default_view->show) {
-        ui->default_view->show(ui->default_view);
-    }
-    
+    // Create camper view (hidden until selected via dropdown)
+    ui->camper_view = ui_camper_view_create(ui, ui->tab_live);
+
     // Keep the old label for compatibility but hide it
     ui->lbl_no_data = lv_label_create(ui->tab_live);
     lv_label_set_text(ui->lbl_no_data, "No live data received yet");
@@ -275,10 +275,17 @@ void ui_init(void) {
     lv_obj_set_width(ui->lbl_no_data, lv_pct(90));
     lv_obj_set_style_text_align(ui->lbl_no_data, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_center(ui->lbl_no_data);
-    lv_obj_add_flag(ui->lbl_no_data, LV_OBJ_FLAG_HIDDEN); // Hide by default
+    lv_obj_add_flag(ui->lbl_no_data, LV_OBJ_FLAG_HIDDEN);
 
     ui_settings_panel_init(ui, default_ssid, default_pass, ap_enabled);
     ui_relay_panel_init(ui);
+
+    // Show the correct initial view based on loaded settings
+    if (ui->view_selection.mode == UI_VIEW_MODE_CAMPER && ui->camper_view && ui->camper_view->show) {
+        ui->camper_view->show(ui->camper_view);
+    } else if (ui->default_view && ui->default_view->show) {
+        ui->default_view->show(ui->default_view);
+    }
 
     lv_obj_add_event_cb(lv_scr_act(), tabview_touch_event_cb, LV_EVENT_PRESSED, ui);
     lv_obj_add_event_cb(lv_scr_act(), tabview_touch_event_cb, LV_EVENT_CLICKED, ui);
@@ -298,7 +305,10 @@ void ui_on_panel_data(const victron_data_t *d) {
 
     ui_state_t *ui = &g_ui;
 
-    lvgl_port_lock(0);
+    if (!lvgl_port_lock(500)) {
+        ESP_LOGW(TAG_UI, "ui_on_panel_data: lock timeout, dropping update (type=0x%02X)", (unsigned)d->type);
+        return;
+    }
 
     if (!ui->has_received_data) {
         ui->has_received_data = true;
@@ -307,9 +317,15 @@ void ui_on_panel_data(const victron_data_t *d) {
         }
     }
     
-    // Always update the default view with incoming data (it handles multiple device types)
-    if (ui->default_view && ui->default_view->update) {
+    // Only update the composite view that is currently visible; updating a
+    // hidden view still invalidates widgets and burns LVGL time.
+    if (ui->default_view && ui->default_view->update && ui->default_view->root &&
+        !lv_obj_has_flag(ui->default_view->root, LV_OBJ_FLAG_HIDDEN)) {
         ui->default_view->update(ui->default_view, d);
+    }
+    if (ui->camper_view && ui->camper_view->update && ui->camper_view->root &&
+        !lv_obj_has_flag(ui->camper_view->root, LV_OBJ_FLAG_HIDDEN)) {
+        ui->camper_view->update(ui->camper_view, d);
     }
 
     const char *type_str = device_type_name(d->type);
@@ -353,32 +369,37 @@ void ui_on_panel_data(const victron_data_t *d) {
 
     ensure_device_layout(ui, d->type);
 
+    /* Only pay the cost of building status strings + updating off-screen
+     * settings-panel labels if the user is actually looking at the Settings
+     * tab. On the Live tab these writes are invisible and just burn CPU +
+     * lock time, which makes touch feel sluggish. */
+    bool settings_visible = (ui->tabview != NULL) &&
+                            (ui->tab_settings_index != UINT16_MAX) &&
+                            (lv_tabview_get_tab_act(ui->tabview) == ui->tab_settings_index);
+
     if (ui->active_view && ui->active_view->update) {
         ui->active_view->update(ui->active_view, d);
-        
-        // Prepare detailed status information based on device type
-        char detailed_status[256] = {0};
-        ui_prepare_detailed_device_status(d, detailed_status, sizeof(detailed_status));
-        
-        // Update device activity tracking
+
+        // Update device activity tracking (cheap, always needed for timeouts)
         ui_update_device_activity(ui, ui->current_device_mac);
-        
-        // Update successful data reception status in Victron Keys page
-        ui_settings_panel_update_victron_device_status(ui, ui->current_device_mac, type_str, product_info, detailed_status);
-    } else {
-        // Update error status in Victron Keys page
+
+        if (settings_visible) {
+            char detailed_status[256] = {0};
+            ui_prepare_detailed_device_status(d, detailed_status, sizeof(detailed_status));
+            ui_settings_panel_update_victron_device_status(ui, ui->current_device_mac,
+                                                           type_str, product_info,
+                                                           detailed_status);
+        }
+    } else if (settings_visible) {
         const char *error_msg = "No renderer for device type";
         if (d->type == VICTRON_BLE_RECORD_TEST) {
             error_msg = "Unknown device type";
         }
-        
-        // Update legacy error label (if it exists)
         if (ui->lbl_error) {
             lv_label_set_text(ui->lbl_error, error_msg);
         }
-        
-        // Update error status for this device in Victron Keys page
-        ui_settings_panel_update_victron_device_status(ui, ui->current_device_mac, type_str, product_info, error_msg);
+        ui_settings_panel_update_victron_device_status(ui, ui->current_device_mac,
+                                                       type_str, product_info, error_msg);
     }
 
     lvgl_port_unlock();
@@ -387,13 +408,16 @@ void ui_on_panel_data(const victron_data_t *d) {
 void ui_force_view_update(void)
 {
     ui_state_t *ui = &g_ui;
-    lvgl_port_lock(0);
-    
+    if (!lvgl_port_lock(500)) {
+        ESP_LOGW(TAG_UI, "ui_force_view_update: lock timeout");
+        return;
+    }
+
     // Force a layout update regardless of current device type
     victron_record_type_t saved_type = ui->current_device_type;
     ui->current_device_type = VICTRON_BLE_RECORD_TEST; // Reset to force update
     ensure_device_layout(ui, saved_type);
-    
+
     lvgl_port_unlock();
 }
 
@@ -410,11 +434,14 @@ void ui_set_ble_mac(const uint8_t *mac) {
              "%02X:%02X:%02X:%02X:%02X:%02X",
              mac[5], mac[4], mac[3], mac[2], mac[1], mac[0]);
     ui_state_t *ui = &g_ui;
-    lvgl_port_lock(0);
-    
+    if (!lvgl_port_lock(500)) {
+        ESP_LOGW(TAG_UI, "ui_set_ble_mac: lock timeout");
+        return;
+    }
+
     // Store current MAC address
     strcpy(ui->current_device_mac, mac_str);
-    
+
     // Legacy MAC field update (if it exists)
     ui_settings_panel_set_mac(ui, mac_str);
     lvgl_port_unlock();
@@ -431,10 +458,15 @@ static void ensure_device_layout(ui_state_t *ui, victron_record_type_t type)
         // Manual view mode selected - determine which view to show
         victron_record_type_t target_type = VICTRON_BLE_RECORD_TEST;
         bool show_default = true;
-        
+        bool show_camper = false;
+
         switch (ui->view_selection.mode) {
             case UI_VIEW_MODE_DEFAULT_BATTERY:
                 show_default = true;
+                break;
+            case UI_VIEW_MODE_CAMPER:
+                show_camper = true;
+                show_default = false;
                 break;
             case UI_VIEW_MODE_SOLAR_CHARGER:
                 target_type = VICTRON_BLE_RECORD_SOLAR_CHARGER;
@@ -456,13 +488,28 @@ static void ensure_device_layout(ui_state_t *ui, victron_record_type_t type)
                 show_default = true;
                 break;
         }
-        
-        if (show_default) {
+
+        if (show_camper) {
+            // Show camper composite view
+            if (ui->active_view && ui->active_view->hide) {
+                ui->active_view->hide(ui->active_view);
+            }
+            ui->active_view = NULL;
+            if (ui->default_view && ui->default_view->hide) {
+                ui->default_view->hide(ui->default_view);
+            }
+            if (ui->camper_view && ui->camper_view->show) {
+                ui->camper_view->show(ui->camper_view);
+            }
+        } else if (show_default) {
             // Show default battery view
             if (ui->active_view && ui->active_view->hide) {
                 ui->active_view->hide(ui->active_view);
             }
             ui->active_view = NULL;
+            if (ui->camper_view && ui->camper_view->hide) {
+                ui->camper_view->hide(ui->camper_view);
+            }
             if (ui->default_view && ui->default_view->show) {
                 ui->default_view->show(ui->default_view);
             }
@@ -471,12 +518,15 @@ static void ensure_device_layout(ui_state_t *ui, victron_record_type_t type)
             if (ui->active_view && ui->active_view->hide) {
                 ui->active_view->hide(ui->active_view);
             }
-            
+
             ui->active_view = NULL;
             ui_device_view_t *view = ui_view_registry_ensure(ui, target_type, ui->tab_live);
             if (view && view->show) {
                 if (ui->default_view && ui->default_view->hide) {
                     ui->default_view->hide(ui->default_view);
+                }
+                if (ui->camper_view && ui->camper_view->hide) {
+                    ui->camper_view->hide(ui->camper_view);
                 }
                 view->show(view);
                 ui->active_view = view;
@@ -488,7 +538,7 @@ static void ensure_device_layout(ui_state_t *ui, victron_record_type_t type)
                 ESP_LOGW(TAG_UI, "Requested view type 0x%02X not available, showing default", (unsigned)target_type);
             }
         }
-        
+
         ui->current_device_type = show_default ? VICTRON_BLE_RECORD_TEST : target_type;
         return;
     }
@@ -679,8 +729,10 @@ static void ui_check_device_timeouts(lv_timer_t *timer)
     if (ui == NULL) {
         return;
     }
-    
+
     uint32_t current_time = lv_tick_get();
+    ESP_LOGI(TAG_UI, "heartbeat: LVGL task alive, tick=%" PRIu32 " ms, free_heap=%" PRIu32,
+             current_time, esp_get_free_heap_size());
     const uint32_t timeout_ms = 30000; // 30 seconds timeout
     
     // Check each tracked device for timeout
